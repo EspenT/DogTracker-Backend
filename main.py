@@ -9,6 +9,7 @@ import json
 import asyncio
 from datetime import datetime, timedelta
 import traceback
+from mqtt_handler import start_mqtt_thread  # ✅ Added MQTT integration
 
 # Configure global logging
 logging.basicConfig(
@@ -59,8 +60,8 @@ def init_db():
 
 init_db()
 
-async def broadcast(message: str, sender: WebSocket):
-    logging.info(f"Broadcasting to {len(active_connections)-1} clients")
+async def broadcast(message: str, sender: WebSocket = None):
+    logging.info(f"Broadcasting to {len(active_connections) - (1 if sender else 0)} clients")
     for connection in active_connections:
         if connection != sender:
             try:
@@ -150,4 +151,19 @@ def get_recent_locations(device_id: str = Query(...)):
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+# MQTT ingestion callback for backend
+def mqtt_ingest(data):
+    logging.info("[MQTT -> WS] Handling parsed MQTT data")
+    save_to_db(data)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    asyncio.run_coroutine_threadsafe(broadcast(json.dumps(data)), loop)
+
+# Start background MQTT listener thread
+start_mqtt_thread(mqtt_ingest)
 

@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip install --no-cache-dir fastapi uvicorn websockets
+RUN pip install --no-cache-dir fastapi uvicorn websockets python-dotenv paho-mqtt 
+
 
 EXPOSE 8000
 
