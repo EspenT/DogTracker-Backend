@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip install --no-cache-dir fastapi uvicorn websockets python-dotenv paho-mqtt 
+RUN pip install --no-cache-dir fastapi uvicorn websockets python-dotenv paho-mqtt PyJWT passlib[bcrypt] python-multipart pydantic[email]
 
 
 EXPOSE 8000

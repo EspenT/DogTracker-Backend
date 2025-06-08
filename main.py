@@ -1,169 +1,1377 @@
-### 📁 File: main.py
-import os
-import logging
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import sqlite3
-import json
+#!/usr/bin/env python3
+"""
+Complete Dog Tracker Backend Server
+This is the LATEST and COMPLETE version - use this file!
+
+Features:
+- WebSocket real-time communication
+- User authentication (JWT)
+- Friends management
+- Groups management
+- Device management and sharing
+- Location tracking and broadcasting
+- SQLite database storage
+"""
+
 import asyncio
+import json
+import sqlite3
+import hashlib
+import jwt
+import logging
 from datetime import datetime, timedelta
-import traceback
-from mqtt_handler import start_mqtt_thread  # ✅ Added MQTT integration
+from typing import Dict, List, Optional, Set
+from dataclasses import dataclass, asdict
+from contextlib import asynccontextmanager
 
-# Configure global logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr
+import uvicorn
 
-app = FastAPI()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Debug flag from env (e.g., DEBUG=true)
-DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+# JWT Configuration
+JWT_SECRET = "your-secret-key-change-in-production"
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
-# Allow CORS for local dev
+# Security
+security = HTTPBearer()
+
+# Data Models
+@dataclass
+class User:
+    uuid: str
+    email: str
+    password_hash: str
+    nickname: str
+    created_at: datetime
+    last_seen: Optional[datetime] = None
+
+@dataclass
+class UserLocation:
+    uuid: str
+    email: str
+    nickname: str
+    latitude: Optional[float]
+    longitude: Optional[float]
+    altitude: Optional[float]
+    speed: Optional[float]
+    battery: Optional[int]
+    accuracy: Optional[float]
+    timestamp: datetime
+
+@dataclass
+class Device:
+    imei: str
+    owner_uuid: str
+    name: str
+    created_at: datetime
+    last_seen: Optional[datetime] = None
+
+@dataclass
+class DeviceLocation:
+    device_id: str
+    owner_uuid: str
+    owner_email: str
+    owner_nickname: str
+    device_name: str
+    latitude: Optional[float]
+    longitude: Optional[float]
+    altitude: Optional[float]
+    speed: Optional[float]
+    battery: Optional[int]
+    battery_mv: Optional[int]
+    bark: Optional[int]
+    satellites: Optional[int]
+    lte_signal: Optional[int]
+    lora_rssi: Optional[int]
+    connection_type: Optional[str]
+    time: Optional[str]
+    timestamp: datetime
+    type: str  # 'own', 'shared', 'friend', 'group_member'
+
+@dataclass
+class Friend:
+    uuid: str
+    email: str
+    nickname: str
+    status: str  # 'pending', 'accepted', 'blocked'
+    created_at: datetime
+
+@dataclass
+class Group:
+    id: str
+    name: str
+    description: Optional[str]
+    owner_id: str
+    member_ids: List[str]
+    created_at: datetime
+
+@dataclass
+class DeviceShare:
+    device_imei: str
+    owner_uuid: str
+    shared_with_uuid: str
+    created_at: datetime
+
+# Pydantic Models for API
+class SignUpRequest(BaseModel):
+    email: EmailStr
+    password: str
+    nickname: str
+
+class SignInRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+class LocationUpdate(BaseModel):
+    latitude: float
+    longitude: float
+    altitude: Optional[float] = None
+    speed: Optional[float] = None
+    battery: Optional[int] = None
+    accuracy: Optional[float] = None
+
+class AddFriendRequest(BaseModel):
+    email: EmailStr
+
+class CreateGroupRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class AddGroupMemberRequest(BaseModel):
+    email: EmailStr
+
+class AddDeviceRequest(BaseModel):
+    imei: str
+    name: str
+
+class UpdateDeviceRequest(BaseModel):
+    name: str
+
+class ShareDeviceRequest(BaseModel):
+    email: EmailStr
+
+# Database Manager
+class DatabaseManager:
+    def __init__(self, db_path: str = "dog_tracker.db"):
+        self.db_path = db_path
+        self.init_database()
+
+    def init_database(self):
+        """Initialize the database with all required tables."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Users table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    uuid TEXT PRIMARY KEY,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    nickname TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP
+                )
+            ''')
+            
+            # User locations table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_locations (
+                    uuid TEXT PRIMARY KEY,
+                    latitude REAL,
+                    longitude REAL,
+                    altitude REAL,
+                    speed REAL,
+                    battery INTEGER,
+                    accuracy REAL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (uuid) REFERENCES users (uuid)
+                )
+            ''')
+            
+            # Devices table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS devices (
+                    imei TEXT PRIMARY KEY,
+                    owner_uuid TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP,
+                    FOREIGN KEY (owner_uuid) REFERENCES users (uuid)
+                )
+            ''')
+            
+            # Device locations table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS device_locations (
+                    device_id TEXT PRIMARY KEY,
+                    latitude REAL,
+                    longitude REAL,
+                    altitude REAL,
+                    speed REAL,
+                    battery INTEGER,
+                    battery_mv INTEGER,
+                    bark INTEGER,
+                    satellites INTEGER,
+                    lte_signal INTEGER,
+                    lora_rssi INTEGER,
+                    connection_type TEXT,
+                    time TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (device_id) REFERENCES devices (imei)
+                )
+            ''')
+            
+            # Friends table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS friends (
+                    user_uuid TEXT,
+                    friend_uuid TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_uuid, friend_uuid),
+                    FOREIGN KEY (user_uuid) REFERENCES users (uuid),
+                    FOREIGN KEY (friend_uuid) REFERENCES users (uuid)
+                )
+            ''')
+            
+            # Groups table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS groups (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    owner_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (owner_id) REFERENCES users (uuid)
+                )
+            ''')
+            
+            # Group members table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_members (
+                    group_id TEXT,
+                    user_uuid TEXT,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_id, user_uuid),
+                    FOREIGN KEY (group_id) REFERENCES groups (id),
+                    FOREIGN KEY (user_uuid) REFERENCES users (uuid)
+                )
+            ''')
+            
+            # Device shares table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS device_shares (
+                    device_imei TEXT,
+                    owner_uuid TEXT,
+                    shared_with_uuid TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (device_imei, shared_with_uuid),
+                    FOREIGN KEY (device_imei) REFERENCES devices (imei),
+                    FOREIGN KEY (owner_uuid) REFERENCES users (uuid),
+                    FOREIGN KEY (shared_with_uuid) REFERENCES users (uuid)
+                )
+            ''')
+            
+            conn.commit()
+            logger.info("Database initialized successfully")
+
+    def get_connection(self):
+        """Get a database connection."""
+        return sqlite3.connect(self.db_path)
+
+# Connection Manager for WebSockets
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}  # user_uuid -> websocket
+
+    async def connect(self, websocket: WebSocket, user_uuid: str):
+        await websocket.accept()
+        self.active_connections[user_uuid] = websocket
+        logger.info(f"User {user_uuid} connected via WebSocket")
+
+    def disconnect(self, user_uuid: str):
+        if user_uuid in self.active_connections:
+            del self.active_connections[user_uuid]
+            logger.info(f"User {user_uuid} disconnected from WebSocket")
+
+    async def send_personal_message(self, message: dict, user_uuid: str):
+        if user_uuid in self.active_connections:
+            try:
+                await self.active_connections[user_uuid].send_text(json.dumps(message))
+            except Exception as e:
+                logger.error(f"Error sending message to {user_uuid}: {e}")
+                self.disconnect(user_uuid)
+
+    async def broadcast_to_friends(self, message: dict, user_uuid: str, db: DatabaseManager):
+        """Broadcast message to all friends of the user."""
+        friends = self.get_user_friends(user_uuid, db)
+        for friend in friends:
+            if friend.status == 'accepted':
+                await self.send_personal_message(message, friend.uuid)
+
+    async def broadcast_to_group_members(self, message: dict, group_id: str, db: DatabaseManager):
+        """Broadcast message to all members of a group."""
+        members = self.get_group_members(group_id, db)
+        for member_uuid in members:
+            await self.send_personal_message(message, member_uuid)
+
+    def get_user_friends(self, user_uuid: str, db: DatabaseManager) -> List[Friend]:
+        """Get all friends of a user."""
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT u.uuid, u.email, u.nickname, f.status, f.created_at
+                FROM friends f
+                JOIN users u ON f.friend_uuid = u.uuid
+                WHERE f.user_uuid = ?
+                UNION
+                SELECT u.uuid, u.email, u.nickname, f.status, f.created_at
+                FROM friends f
+                JOIN users u ON f.user_uuid = u.uuid
+                WHERE f.friend_uuid = ? AND f.status = 'accepted'
+            ''', (user_uuid, user_uuid))
+            
+            friends = []
+            for row in cursor.fetchall():
+                friends.append(Friend(
+                    uuid=row[0],
+                    email=row[1],
+                    nickname=row[2],
+                    status=row[3],
+                    created_at=datetime.fromisoformat(row[4])
+                ))
+            return friends
+
+    def get_group_members(self, group_id: str, db: DatabaseManager) -> List[str]:
+        """Get all member UUIDs of a group."""
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT user_uuid FROM group_members WHERE group_id = ?', (group_id,))
+            return [row[0] for row in cursor.fetchall()]
+
+# Initialize managers
+db_manager = DatabaseManager()
+connection_manager = ConnectionManager()
+
+# Authentication utilities
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Verify a password against its hash."""
+    return hash_password(password) == password_hash
+
+def create_jwt_token(user_uuid: str) -> str:
+    """Create a JWT token for a user."""
+    payload = {
+        'user_uuid': user_uuid,
+        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def decode_jwt_token(token: str) -> Optional[str]:
+    """Decode a JWT token and return the user UUID."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get('user_uuid')
+    except jwt.ExpiredSignatureError:
+        logger.warning("JWT token expired")
+        return None
+    except jwt.InvalidTokenError:
+        logger.warning("Invalid JWT token")
+        return None
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Get the current user from JWT token."""
+    user_uuid = decode_jwt_token(credentials.credentials)
+    if not user_uuid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user_uuid
+
+# Generate UUID
+import uuid
+def generate_uuid() -> str:
+    return str(uuid.uuid4())
+
+# FastAPI app
+app = FastAPI(title="Dog Tracker Backend", version="1.0.0")
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # In production, specify actual origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory list of connections
-active_connections: list[WebSocket] = []
-
-# SQLite DB path
-DB_PATH = "/app/data/dogtracker.db"
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-# SQLite setup
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS locations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT,
-            timestamp TEXT,
-            user_lat REAL,
-            user_lon REAL,
-            dog_lat REAL,
-            dog_lon REAL,
-            bark INTEGER,
-            raw TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-async def broadcast(message: str, sender: WebSocket = None):
-    logging.info(f"Broadcasting to {len(active_connections) - (1 if sender else 0)} clients")
-    for connection in active_connections:
-        if connection != sender:
-            try:
-                await connection.send_text(message)
-            except Exception as e:
-                logging.warning(f"Failed to send to a client: {e}")
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.append(websocket)
-    logging.info("Client connected")
-
-    try:
-        while True:
-            try:
-                raw = await websocket.receive_text()
-                logging.info(f"Raw received: {raw}")
-
-                try:
-                    data = json.loads(raw)
-                    logging.info(f"Parsed data: {json.dumps(data, indent=2)}")
-                    save_to_db(data)
-                    await broadcast(raw, websocket)
-                except Exception as parse_error:
-                    logging.warning(f"Error parsing or saving: {parse_error}")
-                    traceback.print_exc()
-
-            except WebSocketDisconnect:
-                break
-            except Exception as e:
-                logging.warning(f"Error receiving message: {e}")
-                traceback.print_exc()
-    finally:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-        logging.info("Client disconnected")
-
-def save_to_db(obj: dict):
-    payload = obj.get("payload", {})
-    dog = payload.get("dog", {})
-    user = payload.get("user", {})
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO locations (device_id, timestamp, user_lat, user_lon, dog_lat, dog_lon, bark, raw)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        dog.get("device_id", "unknown"),
-        payload.get("timestamp"),
-        user.get("lat"),
-        user.get("lon"),
-        dog.get("latitude"),
-        dog.get("longitude"),
-        dog.get("bark", 0),
-        json.dumps(obj)
-    ))
-    conn.commit()
-    conn.close()
-
-@app.get("/locations/recent")
-def get_recent_locations(device_id: str = Query(...)):
-    try:
-        since = datetime.utcnow() - timedelta(hours=4)
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''
-            SELECT timestamp, dog_lat, dog_lon, bark FROM locations
-            WHERE device_id = ? AND timestamp >= ?
-            ORDER BY timestamp ASC
-        ''', (device_id, since.isoformat()))
-
-        rows = c.fetchall()
-        conn.close()
-
-        result = [
-            {"timestamp": r[0], "lat": r[1], "lon": r[2], "bark": r[3]}
-            for r in rows
-        ]
-        return JSONResponse(content=result)
-    except Exception as e:
-        logging.error(f"Error retrieving recent locations: {e}")
-        traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
+# Health check
 @app.get("/health")
-def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-# MQTT ingestion callback for backend
-def mqtt_ingest(data):
-    logging.info("[MQTT -> WS] Handling parsed MQTT data")
-    save_to_db(data)
+# Authentication endpoints
+@app.post("/signup")
+async def sign_up(request: SignUpRequest):
+    """Register a new user."""
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if user already exists
+            cursor.execute('SELECT uuid FROM users WHERE email = ?', (request.email,))
+            if cursor.fetchone():
+                raise HTTPException(status_code=400, detail="Email already registered")
+            
+            # Create new user
+            user_uuid = generate_uuid()
+            password_hash = hash_password(request.password)
+            
+            cursor.execute('''
+                INSERT INTO users (uuid, email, password_hash, nickname)
+                VALUES (?, ?, ?, ?)
+            ''', (user_uuid, request.email, password_hash, request.nickname))
+            
+            conn.commit()
+            
+            # Create JWT token
+            token = create_jwt_token(user_uuid)
+            
+            logger.info(f"New user registered: {request.email}")
+            return {
+                "token": token,
+                "uuid": user_uuid,
+                "email": request.email,
+                "nickname": request.nickname
+            }
+            
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    except Exception as e:
+        logger.error(f"Sign up error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-    asyncio.run_coroutine_threadsafe(broadcast(json.dumps(data)), loop)
+@app.post("/signin")
+async def sign_in(request: SignInRequest):
+    """Sign in an existing user."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT uuid, password_hash, nickname FROM users WHERE email = ?
+            ''', (request.email,))
+            
+            user = cursor.fetchone()
+            if not user or not verify_password(request.password, user[1]):
+                raise HTTPException(status_code=401, detail="Invalid email or password")
+            
+            user_uuid, _, nickname = user
+            
+            # Update last seen
+            cursor.execute('UPDATE users SET last_seen = ? WHERE uuid = ?', 
+                         (datetime.now(), user_uuid))
+            conn.commit()
+            
+            # Create JWT token
+            token = create_jwt_token(user_uuid)
+            
+            logger.info(f"User signed in: {request.email}")
+            return {
+                "token": token,
+                "uuid": user_uuid,
+                "email": request.email,
+                "nickname": nickname
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Sign in error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-# Start background MQTT listener thread
-start_mqtt_thread(mqtt_ingest)
+# Friends endpoints
+@app.get("/friends")
+async def get_friends(current_user: str = Depends(get_current_user)):
+    """Get user's friends list."""
+    try:
+        friends = connection_manager.get_user_friends(current_user, db_manager)
+        return [asdict(friend) for friend in friends]
+    except Exception as e:
+        logger.error(f"Get friends error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/friends")
+async def add_friend(request: AddFriendRequest, current_user: str = Depends(get_current_user)):
+    """Send a friend request."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Find the friend by email
+            cursor.execute('SELECT uuid FROM users WHERE email = ?', (request.email,))
+            friend = cursor.fetchone()
+            if not friend:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            friend_uuid = friend[0]
+            
+            if friend_uuid == current_user:
+                raise HTTPException(status_code=400, detail="Cannot add yourself as friend")
+            
+            # Check if friendship already exists
+            cursor.execute('''
+                SELECT status FROM friends 
+                WHERE (user_uuid = ? AND friend_uuid = ?) OR (user_uuid = ? AND friend_uuid = ?)
+            ''', (current_user, friend_uuid, friend_uuid, current_user))
+            
+            existing = cursor.fetchone()
+            if existing:
+                raise HTTPException(status_code=400, detail="Friend relationship already exists")
+            
+            # Add friend request
+            cursor.execute('''
+                INSERT INTO friends (user_uuid, friend_uuid, status)
+                VALUES (?, ?, 'pending')
+            ''', (current_user, friend_uuid))
+            
+            conn.commit()
+            
+            # Notify the friend via WebSocket
+            await connection_manager.send_personal_message({
+                "type": "friend_request",
+                "data": {"from": current_user, "email": request.email}
+            }, friend_uuid)
+            
+            return {"message": "Friend request sent"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add friend error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/friends/{friend_uuid}/accept")
+async def accept_friend_request(friend_uuid: str, current_user: str = Depends(get_current_user)):
+    """Accept a friend request."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Update the friend request status
+            cursor.execute('''
+                UPDATE friends SET status = 'accepted' 
+                WHERE user_uuid = ? AND friend_uuid = ? AND status = 'pending'
+            ''', (friend_uuid, current_user))
+            
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Friend request not found")
+            
+            conn.commit()
+            
+            # Notify the requester via WebSocket
+            await connection_manager.send_personal_message({
+                "type": "friend_accepted",
+                "data": {"by": current_user}
+            }, friend_uuid)
+            
+            return {"message": "Friend request accepted"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Accept friend error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/friends/{friend_uuid}")
+async def remove_friend(friend_uuid: str, current_user: str = Depends(get_current_user)):
+    """Remove a friend."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Remove the friendship (both directions)
+            cursor.execute('''
+                DELETE FROM friends 
+                WHERE (user_uuid = ? AND friend_uuid = ?) OR (user_uuid = ? AND friend_uuid = ?)
+            ''', (current_user, friend_uuid, friend_uuid, current_user))
+            
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Friend relationship not found")
+            
+            conn.commit()
+            
+            return {"message": "Friend removed"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Remove friend error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Groups endpoints
+@app.get("/groups")
+async def get_groups(current_user: str = Depends(get_current_user)):
+    """Get user's groups."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.id, g.name, g.description, g.owner_id, g.created_at
+                FROM groups g
+                LEFT JOIN group_members gm ON g.id = gm.group_id
+                WHERE g.owner_id = ? OR gm.user_uuid = ?
+                GROUP BY g.id
+            ''', (current_user, current_user))
+            
+            groups = []
+            for row in cursor.fetchall():
+                group_id = row[0]
+                
+                # Get member IDs
+                cursor.execute('SELECT user_uuid FROM group_members WHERE group_id = ?', (group_id,))
+                member_ids = [member[0] for member in cursor.fetchall()]
+                
+                groups.append({
+                    'id': group_id,
+                    'name': row[1],
+                    'description': row[2],
+                    'owner_id': row[3],
+                    'member_ids': member_ids,
+                    'created_at': row[4]
+                })
+            
+            return groups
+            
+    except Exception as e:
+        logger.error(f"Get groups error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/groups")
+async def create_group(request: CreateGroupRequest, current_user: str = Depends(get_current_user)):
+    """Create a new group."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            group_id = generate_uuid()
+            
+            cursor.execute('''
+                INSERT INTO groups (id, name, description, owner_id)
+                VALUES (?, ?, ?, ?)
+            ''', (group_id, request.name, request.description, current_user))
+            
+            # Add owner as member
+            cursor.execute('''
+                INSERT INTO group_members (group_id, user_uuid)
+                VALUES (?, ?)
+            ''', (group_id, current_user))
+            
+            conn.commit()
+            
+            return {
+                "id": group_id,
+                "name": request.name,
+                "description": request.description,
+                "owner_id": current_user,
+                "member_ids": [current_user],
+                "created_at": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        logger.error(f"Create group error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/groups/{group_id}")
+async def delete_group(group_id: str, current_user: str = Depends(get_current_user)):
+    """Delete a group (owner only)."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if user is the owner
+            cursor.execute('SELECT owner_id FROM groups WHERE id = ?', (group_id,))
+            group = cursor.fetchone()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+            
+            if group[0] != current_user:
+                raise HTTPException(status_code=403, detail="Only group owner can delete the group")
+            
+            # Delete group members first
+            cursor.execute('DELETE FROM group_members WHERE group_id = ?', (group_id,))
+            
+            # Delete the group
+            cursor.execute('DELETE FROM groups WHERE id = ?', (group_id,))
+            
+            conn.commit()
+            
+            return {"message": "Group deleted"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete group error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/groups/{group_id}/members")
+async def add_group_member(group_id: str, request: AddGroupMemberRequest, current_user: str = Depends(get_current_user)):
+    """Add a member to a group."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if user is the owner or member of the group
+            cursor.execute('''
+                SELECT g.owner_id FROM groups g
+                LEFT JOIN group_members gm ON g.id = gm.group_id
+                WHERE g.id = ? AND (g.owner_id = ? OR gm.user_uuid = ?)
+            ''', (group_id, current_user, current_user))
+            
+            if not cursor.fetchone():
+                raise HTTPException(status_code=403, detail="Not authorized to add members to this group")
+            
+            # Find user by email
+            cursor.execute('SELECT uuid FROM users WHERE email = ?', (request.email,))
+            user = cursor.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            user_uuid = user[0]
+            
+            # Add member to group
+            cursor.execute('''
+                INSERT OR IGNORE INTO group_members (group_id, user_uuid)
+                VALUES (?, ?)
+            ''', (group_id, user_uuid))
+            
+            conn.commit()
+            
+            # Notify the new member via WebSocket
+            await connection_manager.send_personal_message({
+                "type": "group_invitation",
+                "data": {"group_id": group_id, "by": current_user}
+            }, user_uuid)
+            
+            return {"message": "Member added to group"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add group member error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/groups/{group_id}/members/{member_uuid}")
+async def remove_group_member(group_id: str, member_uuid: str, current_user: str = Depends(get_current_user)):
+    """Remove a member from a group."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if user is the owner of the group or removing themselves
+            cursor.execute('SELECT owner_id FROM groups WHERE id = ?', (group_id,))
+            group = cursor.fetchone()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+            
+            if group[0] != current_user and member_uuid != current_user:
+                raise HTTPException(status_code=403, detail="Not authorized to remove this member")
+            
+            # Remove member from group
+            cursor.execute('''
+                DELETE FROM group_members WHERE group_id = ? AND user_uuid = ?
+            ''', (group_id, member_uuid))
+            
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Member not found in group")
+            
+            conn.commit()
+            
+            return {"message": "Member removed from group"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Remove group member error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Device management endpoints
+@app.get("/devices")
+async def get_devices(current_user: str = Depends(get_current_user)):
+    """Get user's devices."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT imei, name, created_at, last_seen FROM devices WHERE owner_uuid = ?
+            ''', (current_user,))
+            
+            devices = []
+            for row in cursor.fetchall():
+                devices.append({
+                    'imei': row[0],
+                    'name': row[1],
+                    'created_at': row[2],
+                    'last_seen': row[3]
+                })
+            
+            return devices
+            
+    except Exception as e:
+        logger.error(f"Get devices error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/devices")
+async def add_device(request: AddDeviceRequest, current_user: str = Depends(get_current_user)):
+    """Add a new device."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if device already exists
+            cursor.execute('SELECT owner_uuid FROM devices WHERE imei = ?', (request.imei,))
+            existing = cursor.fetchone()
+            if existing:
+                raise HTTPException(status_code=400, detail="Device already registered")
+            
+            cursor.execute('''
+                INSERT INTO devices (imei, owner_uuid, name)
+                VALUES (?, ?, ?)
+            ''', (request.imei, current_user, request.name))
+            
+            conn.commit()
+            
+            return {"message": "Device added successfully"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add device error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.put("/devices/{imei}")
+async def update_device(imei: str, request: UpdateDeviceRequest, current_user: str = Depends(get_current_user)):
+    """Update device name."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE devices SET name = ? WHERE imei = ? AND owner_uuid = ?
+            ''', (request.name, imei, current_user))
+            
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Device not found")
+            
+            conn.commit()
+            
+            return {"message": "Device updated successfully"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update device error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/devices/{imei}")
+async def remove_device(imei: str, current_user: str = Depends(get_current_user)):
+    """Remove a device."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Remove device shares first
+            cursor.execute('DELETE FROM device_shares WHERE device_imei = ?', (imei,))
+            
+            # Remove device locations
+            cursor.execute('DELETE FROM device_locations WHERE device_id = ?', (imei,))
+            
+            # Remove the device
+            cursor.execute('DELETE FROM devices WHERE imei = ? AND owner_uuid = ?', (imei, current_user))
+            
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Device not found")
+            
+            conn.commit()
+            
+            return {"message": "Device removed successfully"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Remove device error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/devices/{imei}/share")
+async def share_device(imei: str, request: ShareDeviceRequest, current_user: str = Depends(get_current_user)):
+    """Share a device with another user."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if device belongs to current user
+            cursor.execute('SELECT name FROM devices WHERE imei = ? AND owner_uuid = ?', (imei, current_user))
+            device = cursor.fetchone()
+            if not device:
+                raise HTTPException(status_code=404, detail="Device not found")
+            
+            # Find user by email
+            cursor.execute('SELECT uuid FROM users WHERE email = ?', (request.email,))
+            user = cursor.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            shared_with_uuid = user[0]
+            
+            if shared_with_uuid == current_user:
+                raise HTTPException(status_code=400, detail="Cannot share device with yourself")
+            
+            # Add device share
+            cursor.execute('''
+                INSERT OR REPLACE INTO device_shares (device_imei, owner_uuid, shared_with_uuid)
+                VALUES (?, ?, ?)
+            ''', (imei, current_user, shared_with_uuid))
+            
+            conn.commit()
+            
+            # Notify the user via WebSocket
+            await connection_manager.send_personal_message({
+                "type": "device_shared",
+                "data": {"device_imei": imei, "device_name": device[0], "by": current_user}
+            }, shared_with_uuid)
+            
+            return {"message": "Device shared successfully"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Share device error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.delete("/devices/{imei}/share/{user_uuid}")
+async def unshare_device(imei: str, user_uuid: str, current_user: str = Depends(get_current_user)):
+    """Stop sharing a device with a user."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                DELETE FROM device_shares 
+                WHERE device_imei = ? AND owner_uuid = ? AND shared_with_uuid = ?
+            ''', (imei, current_user, user_uuid))
+            
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Device share not found")
+            
+            conn.commit()
+            
+            return {"message": "Device unshared successfully"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unshare device error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# WebSocket endpoint
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket, token: str = None):
+    """WebSocket endpoint for real-time communication."""
+    if not token:
+        await websocket.close(code=4001, reason="Token required")
+        return
+    
+    user_uuid = decode_jwt_token(token)
+    if not user_uuid:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+    
+    await connection_manager.connect(websocket, user_uuid)
+    
+    try:
+        # Send initial data
+        await send_initial_data(user_uuid)
+        
+        while True:
+            # Receive data from client
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            await handle_websocket_message(message, user_uuid)
+            
+    except WebSocketDisconnect:
+        connection_manager.disconnect(user_uuid)
+    except Exception as e:
+        logger.error(f"WebSocket error for user {user_uuid}: {e}")
+        connection_manager.disconnect(user_uuid)
+
+async def send_initial_data(user_uuid: str):
+    """Send initial data to a newly connected user."""
+    try:
+        # Send friend locations
+        friend_locations = get_friend_locations(user_uuid)
+        if friend_locations:
+            await connection_manager.send_personal_message({
+                "type": "user_locations",
+                "data": friend_locations
+            }, user_uuid)
+        
+        # Send device locations
+        device_locations = get_device_locations(user_uuid)
+        if device_locations:
+            await connection_manager.send_personal_message({
+                "type": "device_locations",
+                "data": device_locations
+            }, user_uuid)
+        
+        # Send groups
+        groups = get_user_groups_ws(user_uuid)
+        if groups:
+            await connection_manager.send_personal_message({
+                "type": "groups",
+                "data": groups
+            }, user_uuid)
+            
+    except Exception as e:
+        logger.error(f"Error sending initial data to {user_uuid}: {e}")
+
+async def handle_websocket_message(message: dict, user_uuid: str):
+    """Handle incoming WebSocket messages."""
+    try:
+        message_type = message.get('type')
+        data = message.get('data', {})
+        
+        if message_type == 'user_location':
+            await handle_user_location_update(data, user_uuid)
+        elif message_type == 'device_location':
+            await handle_device_location_update(data, user_uuid)
+        else:
+            logger.warning(f"Unknown message type: {message_type}")
+            
+    except Exception as e:
+        logger.error(f"Error handling WebSocket message: {e}")
+
+async def handle_user_location_update(data: dict, user_uuid: str):
+    """Handle user location update."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Update user location
+            cursor.execute('''
+                INSERT OR REPLACE INTO user_locations 
+                (uuid, latitude, longitude, altitude, speed, battery, accuracy, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                user_uuid,
+                data.get('latitude'),
+                data.get('longitude'),
+                data.get('altitude'),
+                data.get('speed'),
+                data.get('battery'),
+                data.get('accuracy'),
+                datetime.now()
+            ))
+            
+            # Update user last seen
+            cursor.execute('UPDATE users SET last_seen = ? WHERE uuid = ?', (datetime.now(), user_uuid))
+            
+            conn.commit()
+        
+        # Broadcast to friends
+        friend_locations = get_friend_locations(user_uuid, include_self=True)
+        user_location = next((loc for loc in friend_locations if loc['uuid'] == user_uuid), None)
+        
+        if user_location:
+            await connection_manager.broadcast_to_friends({
+                "type": "user_locations",
+                "data": [user_location]
+            }, user_uuid, db_manager)
+        
+        logger.info(f"Updated location for user {user_uuid}")
+        
+    except Exception as e:
+        logger.error(f"Error handling user location update: {e}")
+
+async def handle_device_location_update(data: dict, user_uuid: str):
+    """Handle device location update."""
+    try:
+        device_id = data.get('device_id') or data.get('imei')
+        if not device_id:
+            logger.warning("Device location update missing device_id/imei")
+            return
+        
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if device belongs to user
+            cursor.execute('SELECT name FROM devices WHERE imei = ? AND owner_uuid = ?', (device_id, user_uuid))
+            device = cursor.fetchone()
+            if not device:
+                logger.warning(f"Device {device_id} not found for user {user_uuid}")
+                return
+            
+            # Update device location
+            cursor.execute('''
+                INSERT OR REPLACE INTO device_locations 
+                (device_id, latitude, longitude, altitude, speed, battery, battery_mv, 
+                 bark, satellites, lte_signal, lora_rssi, connection_type, time, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                device_id,
+                data.get('latitude') or data.get('lat'),
+                data.get('longitude') or data.get('lon'),
+                data.get('altitude'),
+                data.get('speed'),
+                data.get('battery'),
+                data.get('battery_mv'),
+                data.get('bark'),
+                data.get('satellites'),
+                data.get('lte_signal'),
+                data.get('lora_rssi'),
+                data.get('connection_type'),
+                data.get('time'),
+                datetime.now()
+            ))
+            
+            # Update device last seen
+            cursor.execute('UPDATE devices SET last_seen = ? WHERE imei = ?', (datetime.now(), device_id))
+            
+            conn.commit()
+        
+        # Broadcast to friends and shared users
+        device_locations = get_device_locations(user_uuid)
+        device_location = next((loc for loc in device_locations if loc['device_id'] == device_id), None)
+        
+        if device_location:
+            # Send to friends
+            await connection_manager.broadcast_to_friends({
+                "type": "device_locations",
+                "data": [device_location]
+            }, user_uuid, db_manager)
+            
+            # Send to users with whom device is shared
+            await broadcast_to_shared_users(device_id, {
+                "type": "device_locations",
+                "data": [device_location]
+            })
+        
+        logger.info(f"Updated location for device {device_id}")
+        
+    except Exception as e:
+        logger.error(f"Error handling device location update: {e}")
+
+def get_friend_locations(user_uuid: str, include_self: bool = False) -> List[dict]:
+    """Get locations of user's friends."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            query = '''
+                SELECT u.uuid, u.email, u.nickname, ul.latitude, ul.longitude, 
+                       ul.altitude, ul.speed, ul.battery, ul.accuracy, ul.timestamp
+                FROM users u
+                JOIN user_locations ul ON u.uuid = ul.uuid
+                WHERE u.uuid IN (
+                    SELECT f.friend_uuid FROM friends f 
+                    WHERE f.user_uuid = ? AND f.status = 'accepted'
+                    UNION
+                    SELECT f.user_uuid FROM friends f 
+                    WHERE f.friend_uuid = ? AND f.status = 'accepted'
+                )
+            '''
+            
+            if include_self:
+                query += ' OR u.uuid = ?'
+                cursor.execute(query, (user_uuid, user_uuid, user_uuid))
+            else:
+                cursor.execute(query, (user_uuid, user_uuid))
+            
+            locations = []
+            for row in cursor.fetchall():
+                locations.append({
+                    'uuid': row[0],
+                    'email': row[1],
+                    'nickname': row[2],
+                    'latitude': row[3],
+                    'longitude': row[4],
+                    'altitude': row[5],
+                    'speed': row[6],
+                    'battery': row[7],
+                    'accuracy': row[8],
+                    'timestamp': row[9]
+                })
+            
+            return locations
+            
+    except Exception as e:
+        logger.error(f"Error getting friend locations: {e}")
+        return []
+
+def get_device_locations(user_uuid: str) -> List[dict]:
+    """Get locations of user's devices and shared devices."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get own devices
+            cursor.execute('''
+                SELECT d.imei, d.owner_uuid, u.email, u.nickname, d.name,
+                       dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
+                       dl.battery_mv, dl.bark, dl.satellites, dl.lte_signal, dl.lora_rssi,
+                       dl.connection_type, dl.time, dl.timestamp, 'own' as type
+                FROM devices d
+                JOIN users u ON d.owner_uuid = u.uuid
+                LEFT JOIN device_locations dl ON d.imei = dl.device_id
+                WHERE d.owner_uuid = ?
+            ''', (user_uuid,))
+            
+            locations = []
+            for row in cursor.fetchall():
+                locations.append({
+                    'device_id': row[0],
+                    'owner_uuid': row[1],
+                    'owner_email': row[2],
+                    'owner_nickname': row[3],
+                    'device_name': row[4],
+                    'latitude': row[5],
+                    'longitude': row[6],
+                    'altitude': row[7],
+                    'speed': row[8],
+                    'battery': row[9],
+                    'battery_mv': row[10],
+                    'bark': row[11],
+                    'satellites': row[12],
+                    'lte_signal': row[13],
+                    'lora_rssi': row[14],
+                    'connection_type': row[15],
+                    'time': row[16],
+                    'timestamp': row[17],
+                    'type': row[18]
+                })
+            
+            # Get shared devices
+            cursor.execute('''
+                SELECT d.imei, d.owner_uuid, u.email, u.nickname, d.name,
+                       dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
+                       dl.battery_mv, dl.bark, dl.satellites, dl.lte_signal, dl.lora_rssi,
+                       dl.connection_type, dl.time, dl.timestamp, 'shared' as type
+                FROM device_shares ds
+                JOIN devices d ON ds.device_imei = d.imei
+                JOIN users u ON d.owner_uuid = u.uuid
+                LEFT JOIN device_locations dl ON d.imei = dl.device_id
+                WHERE ds.shared_with_uuid = ?
+            ''', (user_uuid,))
+            
+            for row in cursor.fetchall():
+                locations.append({
+                    'device_id': row[0],
+                    'owner_uuid': row[1],
+                    'owner_email': row[2],
+                    'owner_nickname': row[3],
+                    'device_name': row[4],
+                    'latitude': row[5],
+                    'longitude': row[6],
+                    'altitude': row[7],
+                    'speed': row[8],
+                    'battery': row[9],
+                    'battery_mv': row[10],
+                    'bark': row[11],
+                    'satellites': row[12],
+                    'lte_signal': row[13],
+                    'lora_rssi': row[14],
+                    'connection_type': row[15],
+                    'time': row[16],
+                    'timestamp': row[17],
+                    'type': row[18]
+                })
+            
+            return locations
+            
+    except Exception as e:
+        logger.error(f"Error getting device locations: {e}")
+        return []
+
+def get_user_groups_ws(user_uuid: str) -> List[dict]:
+    """Get user's groups for WebSocket."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.id, g.name, g.description, g.owner_id, g.created_at
+                FROM groups g
+                LEFT JOIN group_members gm ON g.id = gm.group_id
+                WHERE g.owner_id = ? OR gm.user_uuid = ?
+                GROUP BY g.id
+            ''', (user_uuid, user_uuid))
+            
+            groups = []
+            for row in cursor.fetchall():
+                group_id = row[0]
+                
+                # Get member IDs
+                cursor.execute('SELECT user_uuid FROM group_members WHERE group_id = ?', (group_id,))
+                member_ids = [member[0] for member in cursor.fetchall()]
+                
+                groups.append({
+                    'id': group_id,
+                    'name': row[1],
+                    'description': row[2],
+                    'owner_id': row[3],
+                    'member_ids': member_ids,
+                    'created_at': row[4]
+                })
+            
+            return groups
+            
+    except Exception as e:
+        logger.error(f"Error getting user groups: {e}")
+        return []
+
+async def broadcast_to_shared_users(device_imei: str, message: dict):
+    """Broadcast message to users with whom device is shared."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT shared_with_uuid FROM device_shares WHERE device_imei = ?', (device_imei,))
+            
+            for row in cursor.fetchall():
+                shared_with_uuid = row[0]
+                await connection_manager.send_personal_message(message, shared_with_uuid)
+                
+    except Exception as e:
+        logger.error(f"Error broadcasting to shared users: {e}")
+
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Dog Tracker Backend starting up...")
+    logger.info("Database initialized")
+    logger.info("WebSocket manager ready")
+    logger.info("Backend server ready!")
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Dog Tracker Backend shutting down...")
+
+if __name__ == "__main__":
+    # Run the server
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
