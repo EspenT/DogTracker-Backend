@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+import os
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +42,24 @@ JWT_SECRET = "your-secret-key-change-in-production"
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
+ROLE_ADMIN = 'A'
+ROLE_USER = 'A'
+
+BOOTSTRAP_ADMIN_EMAIL_ENV_VAR = 'BOOTSTRAP_ADMIN_EMAIL'
+BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR = 'BOOTSTRAP_ADMIN_PASSWORD'
+
+PROD_ENV_PATH = "prod.env"
+
+load_dotenv(dotenv_path=PROD_ENV_PATH)
+
+if not os.getenv(BOOTSTRAP_ADMIN_EMAIL_ENV_VAR):
+    logger.error(f"{BOOTSTRAP_ADMIN_EMAIL_ENV_VAR} not defined in {PROD_ENV_PATH}, exiting")
+    exit(1)
+
+if not os.getenv(BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR):
+    logger.error(f"{BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR} not defined in {PROD_ENV_PATH}, exiting")
+    exit(1)
+
 # Security
 security = HTTPBearer()
 
@@ -50,6 +71,7 @@ class User:
     password_hash: str
     nickname: str
     created_at: datetime
+    role: str
     last_seen: Optional[datetime] = None
 
 @dataclass
@@ -176,10 +198,11 @@ class DatabaseManager:
                     password_hash TEXT NOT NULL,
                     nickname TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_seen TIMESTAMP
+                    last_seen TIMESTAMP,
+                    role TEXT CHECK(role IN ('U', 'A')) NOT NULL DEFAULT 'U'
                 )
             ''')
-            
+
             # User locations table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS user_locations (
@@ -360,6 +383,7 @@ class ConnectionManager:
 db_manager = DatabaseManager()
 connection_manager = ConnectionManager()
 
+
 # Authentication utilities
 def hash_password(password: str) -> str:
     """Hash a password using SHA-256."""
@@ -404,6 +428,46 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 import uuid
 def generate_uuid() -> str:
     return str(uuid.uuid4())
+
+def create_bootstrap_admin():
+    """Create bootstrap admin if no admin exists"""
+
+    admin_email = os.getenv(BOOTSTRAP_ADMIN_EMAIL_ENV_VAR)
+    if not admin_email:
+        logger.error(f"{BOOTSTRAP_ADMIN_EMAIL_ENV_VAR} not defined in {PROD_ENV_PATH}")
+        exit(1)
+
+    admin_password = os.getenv(BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR)
+    if not admin_password:
+        logger.error(f"{BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR} not defined in {PROD_ENV_PATH}")
+        exit(1)
+
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Check if any admin already exists
+            cursor.execute('SELECT uuid FROM users WHERE role = ?', ROLE_ADMIN)
+            if cursor.fetchone():
+                logger.info("Admin user already exists. skipping bootstrap")
+                return
+
+            # Create new user
+            user_uuid = generate_uuid()
+            password_hash = hash_password(admin_password)
+
+            cursor.execute('''
+                INSERT INTO users (uuid, email, password_hash, nickname, role)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_uuid, admin_password, password_hash, 'bootstrap_admin', ROLE_ADMIN))
+
+            conn.commit()
+
+    except Exception as e:
+        logger.error(f"Error creating bootstrap admin: {e}")
+        exit(1)
+
+create_bootstrap_admin()
 
 # FastAPI app
 app = FastAPI(title="Dog Tracker Backend", version="1.0.0")

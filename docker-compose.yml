@@ -18,6 +18,7 @@ services:
       retries: 3
     env_file:
       - mqtt.env
+      - prod.env
 
 
 
