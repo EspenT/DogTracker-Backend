@@ -17,6 +17,7 @@ import asyncio
 import json
 import sqlite3
 import hashlib
+from fastapi.responses import StreamingResponse
 import jwt
 import logging
 from logging.handlers import RotatingFileHandler
@@ -1073,6 +1074,17 @@ async def unshare_device(imei: str, user_uuid: str, current_user: str = Depends(
         logger.error(f"Unshare device error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+#TODO: authentication
+@app.get("/admin/logs", response_class=StreamingResponse)
+async def get_logs():
+#async def get_logs(current_user: str = Depends(get_current_user)):
+    """Get server logs"""
+    def iterfile():
+        with open(LOG_FILE_PATH, mode="rb") as file_like:
+            yield from file_like
+
+    return StreamingResponse(iterfile())
+
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
@@ -1457,6 +1469,7 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     # Run the server
+    #TODO: make sure this also ends up in same logs (or different log file)
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
