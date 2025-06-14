@@ -19,6 +19,7 @@ import sqlite3
 import hashlib
 import jwt
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, asdict
@@ -33,10 +34,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import uvicorn
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # JWT Configuration
 JWT_SECRET = "your-secret-key-change-in-production"
 JWT_ALGORITHM = "HS256"
@@ -49,6 +46,34 @@ BOOTSTRAP_ADMIN_EMAIL_ENV_VAR = 'BOOTSTRAP_ADMIN_EMAIL'
 BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR = 'BOOTSTRAP_ADMIN_PASSWORD'
 
 PROD_ENV_PATH = "prod.env"
+
+LOG_DIR_PATH = 'logs'
+LOG_FILE_PATH = f'{LOG_DIR_PATH}/dogtracker_backend.log'
+
+
+def create_and_configure_logger():
+    os.makedirs(LOG_DIR_PATH, exist_ok=True)
+
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    max_log_size_in_mb = 10
+    file_handler = RotatingFileHandler(LOG_FILE_PATH, maxBytes=max_log_size_in_mb*1000000, backupCount=3)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s: %(name)s (%(levelname)s) %(message)s')
+
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
+
+logger = create_and_configure_logger()
 
 load_dotenv(dotenv_path=PROD_ENV_PATH)
 
