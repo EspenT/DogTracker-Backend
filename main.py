@@ -356,8 +356,9 @@ def create_bootstrap_admin():
             cursor.execute('''
                 INSERT INTO users (uuid, email, password_hash, nickname, role)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (user_uuid, admin_password, password_hash, 'bootstrap_admin', ROLE_ADMIN))
+            ''', (user_uuid, admin_email, password_hash, 'bootstrap_admin', ROLE_ADMIN))
 
+            logger.info(f"Creating bootstrap admin user")
             conn.commit()
 
     except Exception as e:
