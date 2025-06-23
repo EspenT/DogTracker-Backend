@@ -1,17 +1,15 @@
 import { useState, useEffect } from "react";
 import type { Route } from "./+types/logs";
+import type { AuthContextType} from "../contexts/auth-context";
+import {useAuth} from "../contexts/auth-context";
 
 export async function loader({ params, request }: Route.LoaderArgs) {
     return {};
 }
 
-async function fetchLogs() {
+async function fetchLogs(authContext: AuthContextType) {
     return await fetch(`http://localhost:8000/admin/logs`, {
-      headers: {
-        'Content-Type': 'text/plain',
-        // TODO: Add auth headers if needed
-        // 'Authorization': `Bearer ${process.env.ADMIN_TOKEN}`,
-      },
+      headers: authContext.getAuthHeaders(),
     }).then(response => {
         if (!response.ok) {
           throw new Error(`Failed to fetch logs: ${response.status}`);
@@ -46,6 +44,7 @@ interface LogViewerState  {
 }
 
 export default function Component({ loaderData }: Route.ComponentProps) {
+  const authContext = useAuth();
   const [state, setState] = useState<LogViewerState>({
     autoRefresh: false,
     refreshing: false,
@@ -57,7 +56,7 @@ export default function Component({ loaderData }: Route.ComponentProps) {
   const refreshLogs = async () => {
     setState(prev => ({ ...prev, refreshing: true, clientError: null }));
    
-    const refreshResult = await fetchLogs();
+    const refreshResult = await fetchLogs(authContext);
     setState(prev => ({
       ...prev,
       clientLogContent: refreshResult instanceof Error ? "" : refreshResult.logContent,
@@ -68,7 +67,7 @@ export default function Component({ loaderData }: Route.ComponentProps) {
   }
 
   useEffect(() => {
-      fetchLogs().then((refreshResult) => {
+      fetchLogs(authContext).then((refreshResult) => {
         setState(prev => ({
           ...prev,
           clientLogContent: refreshResult instanceof Error ? "" : refreshResult.logContent,
