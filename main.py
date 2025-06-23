@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
+
 from database_manager import DatabaseManager
 
 from dotenv import load_dotenv
@@ -320,6 +321,27 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user_uuid
+
+async def get_current_user_if_admin(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Get the current user from JWT token, but only if the user is an admin."""
+    user_uuid = decode_jwt_token(credentials.credentials)
+    if not user_uuid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        # Check if user is admin
+        cursor.execute('SELECT uuid FROM users WHERE uuid = ? AND role = ?', (user_uuid, ROLE_ADMIN))
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User does not have admin rights")
+
+        return user_uuid
 
 # Generate UUID
 import uuid
@@ -946,10 +968,8 @@ async def unshare_device(imei: str, user_uuid: str, current_user: str = Depends(
         logger.error(f"Unshare device error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-#TODO: authentication
 @app.get("/admin/logs", response_class=StreamingResponse)
-async def get_logs():
-#async def get_logs(current_user: str = Depends(get_current_user)):
+async def get_logs(current_user: str = Depends(get_current_user_if_admin)):
     """Get server logs"""
     def iterfile():
         with open(LOG_FILE_PATH, mode="rb") as file_like:
