@@ -23,6 +23,7 @@ function Welcome() {
         <div className="max-w-[300px] text-black w-full space-y-6 px-4">
           <nav className="rounded-3xl border border-gray-200 p-6 dark:border-gray-700 space-y-4">
             <NavLink to="/logs">Logs</NavLink>
+            <NavLink to="/users">Users</NavLink>
           </nav>
         </div>
       </div>
