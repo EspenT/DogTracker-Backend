@@ -43,7 +43,8 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
 ROLE_ADMIN = 'A'
-ROLE_USER = 'A'
+ROLE_USER = 'U'
+
 
 BOOTSTRAP_ADMIN_EMAIL_ENV_VAR = 'BOOTSTRAP_ADMIN_EMAIL'
 BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR = 'BOOTSTRAP_ADMIN_PASSWORD'
@@ -969,13 +970,31 @@ async def unshare_device(imei: str, user_uuid: str, current_user: str = Depends(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/admin/logs", response_class=StreamingResponse)
-async def get_logs(current_user: str = Depends(get_current_user_if_admin)):
+async def get_logs(_: str = Depends(get_current_user_if_admin)):
     """Get server logs"""
     def iterfile():
         with open(LOG_FILE_PATH, mode="rb") as file_like:
             yield from file_like
 
     return StreamingResponse(iterfile())
+
+@app.get("/admin/users")
+async def get_users(_: str = Depends(get_current_user_if_admin)):
+    """Get all users"""
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT uuid, email, created_at, last_seen, role FROM users')
+
+        users = []
+        for row in cursor.fetchall():
+            users.append({
+                'uuid': row[0],
+                'email': row[1],
+                'created_at': row[2],
+                'last_seen': row[3],
+                'role': row[4],
+            })
+        return users
 
 # WebSocket endpoint
 @app.websocket("/ws")
