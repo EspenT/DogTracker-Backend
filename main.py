@@ -996,6 +996,25 @@ async def get_users(_: str = Depends(get_current_user_if_admin)):
             })
         return users
 
+@app.get("/admin/devices")
+async def get_all_devices(_: str = Depends(get_current_user_if_admin)):
+    """Get all devices for all users."""
+    with db_manager.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT d.imei, d.owner_uuid, d.name
+            FROM devices d
+        ''', )
+
+        devices = []
+        for row in cursor.fetchall():
+            devices.append({
+                'device_id': row[0],
+                'owner_uuid': row[1],
+                'device_name': row[2],
+            })
+        return devices
+
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = None):
