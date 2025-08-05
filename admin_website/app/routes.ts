@@ -9,5 +9,6 @@ export default [
     route("", "routes/protected-layout.tsx", [
         route("logs", "routes/logs.tsx"),
         route("users", "routes/users.tsx"),
+        route("devices", "routes/devices.tsx"),
     ])
 ] satisfies RouteConfig;
