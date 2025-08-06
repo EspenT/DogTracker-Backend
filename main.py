@@ -153,6 +153,7 @@ class Friend:
     nickname: str
     status: str  # 'pending', 'accepted', 'blocked'
     created_at: datetime
+    request_sent_by: str
 
 @dataclass
 class Group:
@@ -245,19 +246,19 @@ class ConnectionManager:
             await self.send_personal_message(message, member_uuid)
 
     def get_user_friends(self, user_uuid: str, db: DatabaseManager) -> List[Friend]:
-        """Get all friends of a user."""
+        """Get all accepted and pending friends of a user."""
         with db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT u.uuid, u.email, u.nickname, f.status, f.created_at
+                SELECT u.uuid, u.email, u.nickname, f.status, f.created_at, f.user_uuid
                 FROM friends f
                 JOIN users u ON f.friend_uuid = u.uuid
                 WHERE f.user_uuid = ?
                 UNION
-                SELECT u.uuid, u.email, u.nickname, f.status, f.created_at
+                SELECT u.uuid, u.email, u.nickname, f.status, f.created_at, f.user_uuid
                 FROM friends f
                 JOIN users u ON f.user_uuid = u.uuid
-                WHERE f.friend_uuid = ? AND f.status = 'accepted'
+                WHERE f.friend_uuid = ? AND (f.status = 'accepted' OR f.status = 'pending')
             ''', (user_uuid, user_uuid))
             
             friends = []
@@ -267,7 +268,8 @@ class ConnectionManager:
                     email=row[1],
                     nickname=row[2],
                     status=row[3],
-                    created_at=datetime.fromisoformat(row[4])
+                    created_at=datetime.fromisoformat(row[4]),
+                    request_sent_by=row[5]
                 ))
             return friends
 
