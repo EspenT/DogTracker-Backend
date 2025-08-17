@@ -13,6 +13,7 @@ Features:
 - SQLite database storage
 """
 
+from enum import Enum 
 import asyncio
 import json
 import sqlite3
@@ -131,6 +132,12 @@ class Device:
     created_at: datetime
     last_seen: Optional[datetime] = None
 
+class DeviceLocationType(Enum):
+    OWN = 'own'
+    SHARED = 'shared'
+    FRIEND = 'friend'
+    GROUP_MEMBER = 'group_member'
+
 @dataclass
 class DeviceLocation:
     device_id: str
@@ -151,7 +158,7 @@ class DeviceLocation:
     connection_type: Optional[str]
     time: Optional[str]
     timestamp: datetime
-    type: str  # 'own', 'shared', 'friend', 'group_member'
+    type: DeviceLocationType  # 'own', 'shared', 'friend', 'group_member'
 
 @dataclass
 class Friend:
@@ -1224,12 +1231,14 @@ async def handle_device_location_update(data: dict, user_uuid: str):
         
         if device_location:
             # Send to friends
+            device_location['type'] = DeviceLocationType.FRIEND.value
             await connection_manager.broadcast_to_friends({
                 "type": "device_locations",
                 "data": [device_location]
             }, user_uuid, db_manager)
             
             # Send to users with whom device is shared
+            device_location['type'] = DeviceLocationType.SHARED.value
             await broadcast_to_shared_users(device_id, {
                 "type": "device_locations",
                 "data": [device_location]
