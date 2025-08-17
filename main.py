@@ -48,6 +48,9 @@ ROLE_USER = 'U'
 
 BOOTSTRAP_ADMIN_EMAIL_ENV_VAR = 'BOOTSTRAP_ADMIN_EMAIL'
 BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR = 'BOOTSTRAP_ADMIN_PASSWORD'
+DB_PATH_ENV_VAR = 'DB_PATH'
+SERVER_HOST_ENV_VAR = 'SERVER_HOST'
+SERVER_PORT_ENV_VAR = 'SERVER_PORT'
 
 PROD_ENV_PATH = "prod.env"
 
@@ -91,6 +94,10 @@ if not os.getenv(BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR):
 
 # Security
 security = HTTPBearer()
+
+# Database manager will be initialized in startup event
+
+db_manager = None
 
 # Data Models
 @dataclass
@@ -281,7 +288,6 @@ class ConnectionManager:
             return [row[0] for row in cursor.fetchall()]
 
 # Initialize managers
-db_manager = DatabaseManager(logger)
 connection_manager = ConnectionManager()
 
 
@@ -388,12 +394,39 @@ def create_bootstrap_admin():
 
     except Exception as e:
         logger.error(f"Error creating bootstrap admin: {e}")
-        exit(1)
+        raise
 
-create_bootstrap_admin()
+def on_startup():
+    global db_manager
+    logger.info("Dog Tracker Backend starting up...")
+   
+    # Initialize database manager with current environment configuration
+    db_path = os.getenv(DB_PATH_ENV_VAR, "dog_tracker.db")
+    db_manager = DatabaseManager(logger, db_path)
+    logger.info("Database initialized")
+    
+    # Create bootstrap admin after database is initialized
+    try:
+        create_bootstrap_admin()
+    except Exception as e:
+        logger.error(f"Failed to create bootstrap admin: {e}")
+        exit(1)
+    
+    logger.info("WebSocket manager ready")
+    logger.info("Backend server ready!")
+
+# Shutdown event
+def on_shutdown():
+    logger.info("Dog Tracker Backend shutting down...")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    on_startup()
+    yield
+    on_shutdown()
 
 # FastAPI app
-app = FastAPI(title="Dog Tracker Backend", version="1.0.0")
+app = FastAPI(title="Dog Tracker Backend", version="1.0.0", lifespan=lifespan)
 
 # Add CORS middleware
 app.add_middleware(
@@ -446,6 +479,8 @@ async def sign_up(request: SignUpRequest):
             
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Email already registered")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Sign up error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -1386,26 +1421,18 @@ async def broadcast_to_shared_users(device_imei: str, message: dict):
     except Exception as e:
         logger.error(f"Error broadcasting to shared users: {e}")
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Dog Tracker Backend starting up...")
-    logger.info("Database initialized")
-    logger.info("WebSocket manager ready")
-    logger.info("Backend server ready!")
-
-# Shutdown event
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Dog Tracker Backend shutting down...")
 
 if __name__ == "__main__":
+    # Server configuration
+    host = os.getenv(SERVER_HOST_ENV_VAR, "0.0.0.0")
+    port = int(os.getenv(SERVER_PORT_ENV_VAR, "8000"))
+    
     # Run the server
     #TODO: make sure this also ends up in same logs (or different log file)
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
-        port=8000,
+        host=host,
+        port=port,
         reload=True,
-        log_level="info"
+        log_level="info",
     )

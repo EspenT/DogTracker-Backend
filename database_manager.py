@@ -7,12 +7,13 @@ class DatabaseManager:
     def __init__(self, logger: logging.Logger, db_path: str = "dog_tracker.db"):
         self.logger = logger
         self.db_path = db_path
+        self._connection = sqlite3.connect(db_path)
         self.init_database()
 
     def init_database(self):
         """Initialize the database with all required tables."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        with self._connection:
+            cursor = self._connection.cursor()
             
             # Users table
             cursor.execute('''
@@ -126,9 +127,9 @@ class DatabaseManager:
                 )
             ''')
             
-            conn.commit()
+            self._connection.commit()
             self.logger.info("Database initialized successfully")
 
     def get_connection(self):
         """Get a database connection."""
-        return sqlite3.connect(self.db_path)
+        return self._connection
