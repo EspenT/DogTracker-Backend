@@ -58,7 +58,8 @@ class DatabaseManager:
             # Device locations table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS device_locations (
-                    device_id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY,
+                    device_id TEXT,
                     latitude REAL,
                     longitude REAL,
                     altitude REAL,
