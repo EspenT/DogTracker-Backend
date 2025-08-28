@@ -948,13 +948,13 @@ async def share_device(imei: str, request: ShareDeviceRequest, current_user: str
     try:
         with db_manager.get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Check if device belongs to current user
             cursor.execute('SELECT name FROM devices WHERE imei = ? AND owner_uuid = ?', (imei, current_user))
             device = cursor.fetchone()
             if not device:
                 raise HTTPException(status_code=404, detail="Device not found")
-            
+
             # Find user by email
             cursor.execute('SELECT uuid FROM users WHERE email = ?', (request.email,))
             user = cursor.fetchone()
@@ -1226,24 +1226,23 @@ async def handle_device_location_update(data: dict, user_uuid: str):
             conn.commit()
         
         # Broadcast to friends and shared users
-        device_locations = get_device_locations(user_uuid)
-        device_location = next((loc for loc in device_locations if loc['device_id'] == device_id), None)
-        
-        if device_location:
-            # Send to friends
-            device_location['type'] = DeviceLocationType.FRIEND.value
-            await connection_manager.broadcast_to_friends({
-                "type": "device_locations",
-                "data": [device_location]
-            }, user_uuid, db_manager)
-            
+        device_location = get_device_location(device_id)
+        if device_location is not None:
             # Send to users with whom device is shared
             device_location['type'] = DeviceLocationType.SHARED.value
             await broadcast_to_shared_users(device_id, {
                 "type": "device_locations",
                 "data": [device_location]
             })
-        
+
+            # Send to friends
+            device_location['type'] = DeviceLocationType.FRIEND.value
+            await connection_manager.broadcast_to_friends({
+                "type": "device_locations",
+                "data": [device_location]
+            }, user_uuid, db_manager)
+                
+            
         logger.info(f"Updated location for device {device_id}")
         
     except Exception as e:
@@ -1296,13 +1295,13 @@ def get_friend_locations(user_uuid: str, include_self: bool = False) -> List[dic
         logger.error(f"Error getting friend locations: {e}")
         return []
 
-def get_device_locations(user_uuid: str) -> List[dict]:
-    """Get locations of user's devices and shared devices."""
+def get_owned_device_locations(user_uuid: str) -> List[dict]:
+    """Get last location of user's owned devices."""
+
     try:
         with db_manager.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Get own devices
             cursor.execute('''
                 SELECT d.imei, d.owner_uuid, u.email, u.nickname, d.name,
                        dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
@@ -1312,6 +1311,11 @@ def get_device_locations(user_uuid: str) -> List[dict]:
                 JOIN users u ON d.owner_uuid = u.uuid
                 LEFT JOIN device_locations dl ON d.imei = dl.device_id
                 WHERE d.owner_uuid = ?
+                    AND dl.timestamp IS NULL OR (d.imei, dl.timestamp) IN (
+                        SELECT device_id, MAX(timestamp)
+                        FROM device_locations
+                        GROUP BY device_id
+                    )
             ''', (user_uuid,))
             
             locations = []
@@ -1337,20 +1341,93 @@ def get_device_locations(user_uuid: str) -> List[dict]:
                     'timestamp': row[17],
                     'type': row[18]
                 })
+            return locations
+    except Exception as e:
+        logger.error(f"Error getting owned device locations: {e}")
+        return []
+
+def get_device_location(imei: str) -> dict | None:
+    """ Get last location of given device """
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
             
-            # Get shared devices
             cursor.execute('''
                 SELECT d.imei, d.owner_uuid, u.email, u.nickname, d.name,
                        dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
                        dl.battery_mv, dl.bark, dl.satellites, dl.lte_signal, dl.lora_rssi,
-                       dl.connection_type, dl.time, dl.timestamp, 'shared' as type
-                FROM device_shares ds
-                JOIN devices d ON ds.device_imei = d.imei
+                       dl.connection_type, dl.time, dl.timestamp
+                FROM devices d
                 JOIN users u ON d.owner_uuid = u.uuid
                 LEFT JOIN device_locations dl ON d.imei = dl.device_id
-                WHERE ds.shared_with_uuid = ?
-            ''', (user_uuid,))
-            
+                WHERE d.imei = ?
+                    AND dl.timestamp IS NULL OR (d.imei, dl.timestamp) IN (
+                        SELECT device_id, MAX(timestamp)
+                        FROM device_locations
+                        GROUP BY device_id
+                    )
+            ''', (imei,))
+           
+            row = cursor.fetchone()
+            return {
+                    'device_id': row[0],
+                    'owner_uuid': row[1],
+                    'owner_email': row[2],
+                    'owner_nickname': row[3],
+                    'device_name': row[4],
+                    'latitude': row[5],
+                    'longitude': row[6],
+                    'altitude': row[7],
+                    'speed': row[8],
+                    'battery': row[9],
+                    'battery_mv': row[10],
+                    'bark': row[11],
+                    'satellites': row[12],
+                    'lte_signal': row[13],
+                    'lora_rssi': row[14],
+                    'connection_type': row[15],
+                    'time': row[16],
+                    'timestamp': row[17],
+                }
+    except Exception as e:
+        logger.error(f"Error getting owned device locations: {e}")
+        return None
+
+def get_device_locations(user_uuid: str) -> List[dict]:
+    """Get last locations of user's own devices and devices shared with the user."""
+    try:
+        locations = get_owned_device_locations(user_uuid)
+
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+              WITH sharedDevices AS (
+                  SELECT
+                      d.imei,
+                      d.owner_uuid as owner_uuid,
+                      u.email as email,
+                      u.nickname as nickname,
+                      d.name as name,
+                      'shared' as type
+                  FROM device_shares ds
+                  INNER JOIN devices d ON ds.device_imei = d.imei
+                  INNER JOIN users u ON d.owner_uuid = u.uuid
+                  WHERE ds.shared_with_uuid = ?
+              )
+              SELECT sd.imei, sd.owner_uuid, sd.email, sd.nickname, sd.name,
+                     dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
+                     dl.battery_mv, dl.bark, dl.satellites, dl.lte_signal, dl.lora_rssi,
+                     dl.connection_type, dl.time, dl.timestamp, sd.type
+              FROM sharedDevices sd
+              LEFT JOIN device_locations dl ON sd.imei = dl.device_id
+              WHERE dl.timestamp IS NULL OR (sd.imei, dl.timestamp) IN (
+                  SELECT device_id, MAX(timestamp)
+                  FROM device_locations
+                  WHERE device_id IN (SELECT imei FROM sharedDevices)
+                  GROUP BY device_id
+              )
+              ''', (user_uuid,)) 
+        
             for row in cursor.fetchall():
                 locations.append({
                     'device_id': row[0],
@@ -1373,7 +1450,6 @@ def get_device_locations(user_uuid: str) -> List[dict]:
                     'timestamp': row[17],
                     'type': row[18]
                 })
-            
             return locations
             
     except Exception as e:

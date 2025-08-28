@@ -156,9 +156,8 @@ class TestWebSocket:
                 location_data["longitude"]
             )
 
-
     @pytest.mark.timeout(5)
-    def test_websocket_device_location_sharing(self, test_client: TestClient, test_user_token: str):
+    def test_websocket_shared_device_location_updates_only_contain_latest_locations(self, test_client: TestClient, test_user_token: str):
         """Test device location sharing via WebSocket."""
         headers = {"Authorization": f"Bearer {test_user_token}"}
 
@@ -199,22 +198,24 @@ class TestWebSocket:
             assert data["device_id"] == device_data["imei"]
             assert data["latitude"] == None
             assert data["longitude"] == None
-            
-            # Send device location update
+            assert data["type"] == 'shared'
+
+
             location_data = TestDataFixtures.location_update_data(
                 latitude=60.1699,
                 longitude=24.9384
             )
             location_data['imei'] = device_data['imei']
             location_update_msg = {"type":"device_location", "data": location_data}
+
+            # Send two device location update for same device
             ws.send_json(location_update_msg)
-            
-            # Friend should receive device location update via WebSocket
+
             message = ws_friend.receive_json()
             TestAssertions.assert_websocket_message(message, "device_locations")
-            
             # Verify device location data
             assert "data" in message
+            assert len(message["data"]) == 1
             data = message["data"][0]
             assert "device_id" in data
             assert data["device_id"] == device_data["imei"]
@@ -223,5 +224,73 @@ class TestWebSocket:
             TestAssertions.assert_location_response(
                 data,
                 location_data["latitude"],
-                location_data["longitude"]
+                location_data["longitude"],
             )
+
+            location_update_msg["data"]['latitude'] = 69.0
+            location_update_msg["data"]['longitude'] = 26.0
+            ws.send_json(location_update_msg)
+
+            message = ws_friend.receive_json()
+            TestAssertions.assert_websocket_message(message, "device_locations")
+            # Verify device location data
+            assert "data" in message
+            assert len(message["data"]) == 1
+            data = message["data"][0]
+            TestAssertions.assert_location_response(
+                data,
+                location_data["latitude"],
+                location_data["longitude"],
+            )
+            assert "type" in data
+            assert data["type"] == 'shared'
+
+
+    @pytest.mark.timeout(5)
+    def test_websocket_initial_message_contains_owned_devices_last_locations(self, test_client: TestClient, test_user_token: str):
+        """Test device location sharing via WebSocket."""
+        headers = {"Authorization": f"Bearer {test_user_token}"}
+
+        # Create a device
+        device_data = TestDataFixtures.device_data(
+            imei="999888777666555",
+            name="Test Dog Tracker"
+        )
+        device_response = test_client.post("/devices", json=device_data, headers=headers)
+        assert device_response.status_code == 200
+        
+        with test_client.websocket_connect(f'/ws?token={test_user_token}') as ws:
+            initial_data_message = ws.receive_json() 
+            TestAssertions.assert_websocket_message(initial_data_message, "device_locations")
+            assert "data" in initial_data_message
+            data = initial_data_message["data"][0]
+            assert "device_id" in data
+            assert data["device_id"] == device_data["imei"]
+            assert data["latitude"] == None
+            assert data["longitude"] == None
+            assert data["type"] == 'own'
+
+            location_data = TestDataFixtures.location_update_data(
+                latitude=60.1699,
+                longitude=24.9384
+            )
+            location_data['imei'] = device_data['imei']
+            location_update_msg = {"type":"device_location", "data": location_data}
+
+            # Send two device location update for same device
+            ws.send_json(location_update_msg)
+
+            location_update_msg["data"]['latitude'] = 69.0
+            location_update_msg["data"]['longitude'] = 26.0
+            ws.send_json(location_update_msg)
+
+        with test_client.websocket_connect(f'/ws?token={test_user_token}') as ws_reconnected:
+            initial_data_message = ws_reconnected.receive_json() 
+            TestAssertions.assert_websocket_message(initial_data_message, "device_locations")
+            assert "data" in initial_data_message
+            data = initial_data_message["data"][0]
+            assert "device_id" in data
+            assert data["device_id"] == device_data["imei"]
+            assert data["latitude"] == 69.0
+            assert data["longitude"] == 26.0
+            assert data["type"] == 'own'
