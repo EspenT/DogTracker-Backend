@@ -5,6 +5,8 @@ import os
 import pytest
 from typing import Generator
 from fastapi.testclient import TestClient
+from tests.utils.fixtures import TestDataFixtures
+from typing import Dict, Any
 
 from main import app, DB_PATH_ENV_VAR, BOOTSTRAP_ADMIN_EMAIL_ENV_VAR, BOOTSTRAP_ADMIN_PASSWORD_ENV_VAR
 
@@ -67,7 +69,7 @@ def admin_token(test_client: TestClient) -> str:
 
 
 @pytest.fixture(scope="function")
-def test_user_token(test_client: TestClient) -> str:
+def signed_in_user(test_client: TestClient) -> Dict[str, Any]:
     """Create a test user and return authentication token."""
     import uuid
     # Create test user with unique email
@@ -89,4 +91,9 @@ def test_user_token(test_client: TestClient) -> str:
     })
     assert response.status_code == 200, f"Failed to sign in test user: {response.text}"
     
-    return response.json()["token"]
+    return response.json()
+
+@pytest.fixture(scope="function")
+def test_user_token(signed_in_user: Dict[str, Any]) -> str:
+    """Create a test user and return authentication token."""
+    return signed_in_user['token']

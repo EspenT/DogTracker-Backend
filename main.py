@@ -835,6 +835,11 @@ async def remove_group_member(group_id: str, member_uuid: str, current_user: str
         logger.error(f"Remove group member error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.get("/device_locations")
+async def get_device_locations(current_user: str = Depends(get_current_user)):
+    """Get user's device locations."""
+    return get_all_device_locations(current_user)
+
 # Device management endpoints
 @app.get("/devices")
 async def get_devices(current_user: str = Depends(get_current_user)):
@@ -1103,7 +1108,7 @@ async def send_initial_data(user_uuid: str):
             }, user_uuid)
         
         # Send device locations
-        device_locations = get_device_locations(user_uuid)
+        device_locations = get_last_device_locations(user_uuid)
         if device_locations:
             await connection_manager.send_personal_message({
                 "type": "device_locations",
@@ -1393,7 +1398,100 @@ def get_device_location(imei: str) -> dict | None:
         logger.error(f"Error getting owned device locations: {e}")
         return None
 
-def get_device_locations(user_uuid: str) -> List[dict]:
+def get_all_device_locations(user_uuid: str) -> List[dict]:
+    """Get all device locations the user has access to."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            locations = []
+            cursor.execute('''
+                SELECT d.imei, d.owner_uuid, u.email, u.nickname, d.name,
+                       dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
+                       dl.battery_mv, dl.bark, dl.satellites, dl.lte_signal, dl.lora_rssi,
+                       dl.connection_type, dl.time, dl.timestamp, 'own' as type
+                FROM devices d
+                JOIN users u ON d.owner_uuid = u.uuid
+                LEFT JOIN device_locations dl ON d.imei = dl.device_id
+                WHERE d.owner_uuid = ?
+                ORDER BY d.imei, dl.timestamp
+            ''', (user_uuid,))
+            
+            for row in cursor.fetchall():
+                locations.append({
+                    'device_id': row[0],
+                    'owner_uuid': row[1],
+                    'owner_email': row[2],
+                    'owner_nickname': row[3],
+                    'device_name': row[4],
+                    'latitude': row[5],
+                    'longitude': row[6],
+                    'altitude': row[7],
+                    'speed': row[8],
+                    'battery': row[9],
+                    'battery_mv': row[10],
+                    'bark': row[11],
+                    'satellites': row[12],
+                    'lte_signal': row[13],
+                    'lora_rssi': row[14],
+                    'connection_type': row[15],
+                    'time': row[16],
+                    'timestamp': row[17],
+                    'type': row[18]
+                })
+
+            cursor = conn.cursor()
+            cursor.execute('''
+              WITH sharedDevices AS (
+                  SELECT
+                      d.imei,
+                      d.owner_uuid as owner_uuid,
+                      u.email as email,
+                      u.nickname as nickname,
+                      d.name as name,
+                      'shared' as type
+                  FROM device_shares ds
+                  INNER JOIN devices d ON ds.device_imei = d.imei
+                  INNER JOIN users u ON d.owner_uuid = u.uuid
+                  WHERE ds.shared_with_uuid = ?
+              )
+              SELECT sd.imei, sd.owner_uuid, sd.email, sd.nickname, sd.name,
+                     dl.latitude, dl.longitude, dl.altitude, dl.speed, dl.battery,
+                     dl.battery_mv, dl.bark, dl.satellites, dl.lte_signal, dl.lora_rssi,
+                     dl.connection_type, dl.time, dl.timestamp, sd.type
+              FROM sharedDevices sd
+              LEFT JOIN device_locations dl ON sd.imei = dl.device_id
+              ORDER BY sd.imei, dl.timestamp
+              ''', (user_uuid,)) 
+        
+            for row in cursor.fetchall():
+                locations.append({
+                    'device_id': row[0],
+                    'owner_uuid': row[1],
+                    'owner_email': row[2],
+                    'owner_nickname': row[3],
+                    'device_name': row[4],
+                    'latitude': row[5],
+                    'longitude': row[6],
+                    'altitude': row[7],
+                    'speed': row[8],
+                    'battery': row[9],
+                    'battery_mv': row[10],
+                    'bark': row[11],
+                    'satellites': row[12],
+                    'lte_signal': row[13],
+                    'lora_rssi': row[14],
+                    'connection_type': row[15],
+                    'time': row[16],
+                    'timestamp': row[17],
+                    'type': row[18]
+                })
+            return locations
+        
+    except Exception as e:
+        logger.error(f"Error getting device locations: {e}")
+        return []
+
+def get_last_device_locations(user_uuid: str) -> List[dict]:
     """Get last locations of user's own devices and devices shared with the user."""
     try:
         locations = get_owned_device_locations(user_uuid)

@@ -33,7 +33,8 @@ class TestDataFixtures:
                            altitude: float = 100.0,
                            speed: float = 5.0,
                            battery: int = 85,
-                           accuracy: float = 10.0) -> Dict[str, Any]:
+                           accuracy: float = 10.0,
+                           imei: str = "494688777666556") -> Dict[str, Any]:
         """Generate location update data (Oslo coordinates by default)."""
         return {
             "latitude": latitude,
@@ -41,7 +42,8 @@ class TestDataFixtures:
             "altitude": altitude,
             "speed": speed,
             "battery": battery,
-            "accuracy": accuracy
+            "accuracy": accuracy,
+            "imei": imei
         }
     
     @staticmethod
